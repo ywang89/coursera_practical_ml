@@ -1,0 +1,160 @@
+---
+title: "Final Project"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup}
+library(tidyverse)
+library(stringr)
+library(corrplot)
+library(randomForest)
+```
+
+# Read Data
+```{r, results='hide'}
+df.training.raw = read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"),
+                       header = TRUE,
+                       na.strings = c("", "NA"),
+                       stringsAsFactors = FALSE)
+
+df.testing.raw = read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"),
+                      header = TRUE,
+                      na.strings = c("", "NA"),
+                      stringsAsFactors = FALSE)
+```
+
+# Data Cleaning
+## Variable Names Between Training and Testing
+
+First we check whether the varialbe names are identical between training and testing datasets.
+```{r}
+identical(names(df.training.raw), names(df.testing.raw))
+```
+Their columns are not identical.
+
+```{r}
+index.diff = which(names(df.training.raw) != names(df.testing.raw))
+names(df.training.raw)[index.diff]
+names(df.testing.raw)[index.diff]
+```
+The difference is caused by one varialbe. The last variable of training data is "classe", and the last variable of testing data is "problem_id". This is an expected difference.
+
+## Variable Categories
+
+Next we try to understand a bit more about variables. The goal is to understand what are the various categories these variables belong to.
+```{r}
+vars = names(df.training.raw)
+
+index.1 = str_detect(vars, "belt") # index of "belt" related variables
+index.2 = str_detect(vars, "(fore)?arm") # index of "arm/forearm" related variables
+index.3 = str_detect(vars, "dumbbell") # index of "dumbbell" related variables
+
+vars.1 = vars[index.1] # names of "belt" related variables
+vars.2 = vars[index.2] # names of "arm" or "forearm" related variables
+vars.3 = vars[index.3] # names of "dumbbell" related variables
+```
+
+Running below code, we know that variables not related to "belt", "arm", "forearm", "dumbbell" are not predictor variables.
+```{r}
+vars[!(index.1 | index.2 | index.3)]
+```
+
+Now we see what are the different categories predictor variables belong to. We do this by plotting.
+```{r}
+x.vars = vars[(index.1 | index.2 | index.3)]
+x.vars.category = data.frame(
+  x.var = gsub("_(belt|(fore)?arm|dumbbell)", "", x.vars)
+)
+x.vars.category$x.var = 
+  factor(x.vars.category$x.var,
+         levels = names(sort(table(x.vars.category$x.var),
+                             decreasing = FALSE)))
+
+p1 = ggplot(x.vars.category) + geom_bar(aes(x.var)) + coord_flip()
+p1
+```
+
+Now we construct the training and testing datasets for training and testing.
+```{r}
+y.var = "classe"
+df.training = df.training.raw[, c(x.vars, y.var)]
+df.testing = df.testing.raw[, c(x.vars, "problem_id")]
+```
+
+## Variable Value Formats And Missing Values
+
+According to the plot on variable categories, we know that all predictor variables should be in numeric format. So now we try to find variables that are not in numeric format.
+```{r}
+x.vars.nn = x.vars[sapply(df.training[, x.vars],
+                          function(x) !is.numeric(x))]
+unique(unlist(lapply(df.training[, x.vars.nn],
+                     function(x) unique(x[str_detect(x, "^(?!(-?\\d+\\.\\d+)).*$")]))))
+
+```
+It turns out that the 2 formats not in numeric formats are NA or "#DIV/0!". We replace "#DIV/0!" with NA, and then convert variables to numeric format.
+```{r}
+df.training[, x.vars.nn] = 
+  lapply(df.training[, x.vars.nn], 
+         function(x) as.numeric(gsub("#DIV/0!", NA, x)))
+```
+
+Running below code, we verified that all predictor variable values are now numeric.
+```{r}
+all(sapply(df.training %>% select(-classe), function(x) is.numeric(x)))
+```
+
+We now check the missing values' proportion.
+```{r}
+tbl.miss = table(sapply(df.training, function(x) round(sum(is.na(x)) / length(x), 2)))
+tbl.miss
+plot(
+  tbl.miss,
+  xlab = "missing percentage", ylab = "count"
+  )
+```
+
+There are 100 variables that are missing greater than or equal to 98% of the observations. These variables cannot be used for prediction. We further refine training and testing datasets by removing these variables, and turn "classe" variable into a factor.
+```{r}
+vars.final = names(df.training)[which(sapply(df.training, function(x) sum(is.na(x))) == 0)]
+df.training = df.training[, vars.final]
+df.testing = df.testing[, c(vars.final[-which(vars.final == "classe")],
+                            "problem_id")]
+df.training$classe = as.factor(df.training$classe)
+```
+
+# Modeling
+## Model Training
+The modeling approach we'll take is Random Forests.
+Based on the [source](https://www.stat.berkeley.edu/~breiman/RandomForests/cc_home.htm#ooberr):
+
+> In random forests, there is no need for cross-validation or a separate test set to get an unbiased estimate of the test set error.
+
+As a result, we do not split out a separate validation set or perform cross validation.
+```{r, results='hide'}
+set.seed(1)
+rf.fit = randomForest(classe ~ ., data = df.training, importance = TRUE)
+```
+Now we check the modeling results.
+```{r}
+rf.fit
+layout(matrix(c(1,2), 1, 2, byrow = TRUE),
+       widths = c(4, 1))
+par(mar = c(5.1, 4.1, 4.1, 0))
+plot(rf.fit)
+par(mar = c(5.1, 0, 4.1, 2.1))
+plot(0:1, ann = FALSE, type = "n", axes = FALSE)
+legend("top", colnames(rf.fit$err.rate),col=1:6,cex=0.4,fill=1:6)
+```
+
+We can see that the OOB error is low. This is true both when it comes to overall OOB error or when it comes to OOB error specific to one outcome.
+
+## Predicting
+Now we predict using testing data.
+```{r}
+pred.test = predict(rf.fit, newdata = df.testing)
+quiz.result = data.frame(problem_id = df.testing$problem_id,
+                         prediction = pred.test)
+```
